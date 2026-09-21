@@ -1,0 +1,235 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "tdesktop version to build (no leading v)"
+        required: false
+        default: "7.1.3"
+      libraries_only:
+        description: "Only build and cache the libraries, skip Telegram itself"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: cmd
+
+jobs:
+  windows:
+    name: Windows x64
+    # Pinned on purpose: the runner image picks the MSVC toolset and Windows SDK,
+    # so an unattended image bump would silently change the produced binary.
+    runs-on: windows-2025
+    timeout-minutes: 360
+
+    env:
+      TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID || '611335' }}
+      TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH || 'd524b414d21f4d37f08684c1df41ac9c' }}
+
+    steps:
+      - name: Resolve version.
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then VERSION="${GITHUB_REF_NAME#v}"; fi
+          echo "TDESKTOP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Building tdesktop $VERSION"
+
+      # prepare.py chdirs to <source>/../../../.., so Libraries and ThirdParty must
+      # be siblings of the source tree. The symlink keeps paths short: the real
+      # workspace path is long enough to hit MAX_PATH during the Qt build.
+      - name: Prepare directories.
+        run: |
+          mkdir %userprofile%\TBuild\Libraries\win64
+          mkdir %userprofile%\TBuild\ThirdParty
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Checkout this repository.
+        uses: actions/checkout@v4
+        with:
+          path: noads
+
+      - name: Download tdesktop source.
+        run: |
+          cd /d %TBUILD%
+          curl -fL -o tdesktop.tar.gz https://github.com/telegramdesktop/tdesktop/releases/download/v%TDESKTOP_VERSION%/tdesktop-%TDESKTOP_VERSION%-full.tar.gz
+          tar -xzf tdesktop.tar.gz
+          del tdesktop.tar.gz
+          move tdesktop-%TDESKTOP_VERSION%-full tdesktop
+
+      - name: Apply the ad removal patch.
+        shell: bash
+        run: |
+          cd "$(cygpath -u "$TBUILD")/tdesktop"
+          patch --forward --strip=1 --verbose \
+            -i "$(cygpath -u "$GITHUB_WORKSPACE")/noads/remove-ads.patch"
+
+      - name: First set up.
+        shell: bash
+        run: |
+          TD="$(cygpath -u "$TBUILD")/tdesktop"
+
+          # Debug library builds are never linked into the release binary, but
+          # prepare.py has no skip-debug switch. Dropping /Zi from them saves a
+          # large amount of build time and cache space.
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' \
+            "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
+
+          echo "CACHE_KEY=$(sha256sum "$TD/Telegram/build/prepare/prepare.py" | awk '{ print $1 }')" >> $GITHUB_ENV
+
+          git config --global user.email "you@example.com"
+          git config --global user.name "Sample"
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        name: Native Tools Command Prompt.
+        with:
+          arch: x64
+
+      - name: NuGet sources.
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      # Caches are restored and saved explicitly with a run-unique key so that a
+      # run which only gets partway through the libraries still saves progress.
+      # actions/cache would refuse to write again after its first exact key hit.
+      - name: Restore ThirdParty cache.
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: third-party-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          restore-keys: |
+            third-party-${{ env.CACHE_KEY }}-
+            third-party-
+
+      - name: Restore libraries cache.
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: libs-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          restore-keys: |
+            libs-${{ env.CACHE_KEY }}-
+            libs-
+
+      - name: Restore Qt cache.
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: qt-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          restore-keys: |
+            qt-${{ env.CACHE_KEY }}-
+            qt-
+
+      # No skip-release here: upstream CI builds Telegram in Debug, we ship Release.
+      # Expect several runs before this completes for the first time.
+      - name: Build libraries.
+        id: libraries
+        timeout-minutes: 300
+        continue-on-error: true
+        run: |
+          %TBUILD%\tdesktop\Telegram\build\prepare\win.bat silent
+
+      - name: Free up some disk space.
+        if: always() && steps.libraries.conclusion != 'skipped'
+        shell: bash
+        run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
+
+      # A save that exceeds the repository cache quota must not kill the run,
+      # the build can still succeed and upload an artifact.
+      - name: Save ThirdParty cache.
+        if: always() && steps.libraries.conclusion != 'skipped'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: third-party-${{ env.CACHE_KEY }}-${{ github.run_id }}
+
+      - name: Save libraries cache.
+        if: always() && steps.libraries.conclusion != 'skipped'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: libs-${{ env.CACHE_KEY }}-${{ github.run_id }}
+
+      - name: Save Qt cache.
+        if: always() && steps.libraries.conclusion != 'skipped'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: qt-${{ env.CACHE_KEY }}-${{ github.run_id }}
+
+      - name: Check libraries.
+        if: steps.libraries.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error::Libraries did not finish. Progress was cached, re-run the workflow to continue where it stopped."
+          exit 1
+
+      - name: Build Telegram Desktop.
+        if: ${{ !inputs.libraries_only }}
+        run: |
+          cd %TBUILD%\tdesktop\Telegram
+
+          call configure.bat x64 ^
+          -D TDESKTOP_API_ID=%TDESKTOP_API_ID% ^
+          -D TDESKTOP_API_HASH=%TDESKTOP_API_HASH% ^
+          -D CMAKE_CONFIGURATION_TYPES=Release ^
+          -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+
+          cmake --build ..\out --config Release --parallel
+
+      - name: Package.
+        if: ${{ !inputs.libraries_only }}
+        shell: pwsh
+        run: |
+          $out = "$env:TBUILD\tdesktop\out\Release"
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          Copy-Item "$out\Telegram.exe" artifact\
+          if (Test-Path "$out\Updater.exe") { Copy-Item "$out\Updater.exe" artifact\ }
+          $zip = "telegram-desktop-no-ads-$env:TDESKTOP_VERSION-x64.zip"
+          Compress-Archive -Path artifact\* -DestinationPath $zip
+          echo "ZIP=$zip" >> $env:GITHUB_ENV
+          Get-ChildItem artifact | Select-Object Name, Length
+
+      - name: Upload artifact.
+        if: ${{ !inputs.libraries_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-desktop-no-ads-${{ env.TDESKTOP_VERSION }}-x64
+          path: artifact\
+
+      - name: Publish release.
+        if: ${{ !inputs.libraries_only && startsWith(github.ref, 'refs/tags/') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --generate-notes "$ZIP" \
+            || gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber

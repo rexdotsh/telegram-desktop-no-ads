@@ -1,0 +1,109 @@
+From b15ab6f3f5590071f52132b507a12839a5900037 Mon Sep 17 00:00:00 2001
+From: vehlwn <36479428+vehlwn@users.noreply.github.com>
+Date: Wed, 22 Jun 2022 16:57:44 +0400
+Subject: [PATCH 1/4] Disable sponsored messages
+
+---
+ Telegram/SourceFiles/data/components/sponsored_messages.cpp | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/Telegram/SourceFiles/data/components/sponsored_messages.cpp b/Telegram/SourceFiles/data/components/sponsored_messages.cpp
+index 04b421e..179d38a 100644
+--- a/Telegram/SourceFiles/data/components/sponsored_messages.cpp
++++ b/Telegram/SourceFiles/data/components/sponsored_messages.cpp
+@@ -302,11 +302,6 @@ HistoryItem *SponsoredMessages::injectItem(
+ }
+ 
+ bool SponsoredMessages::canHaveFor(not_null<History*> history) const {
+-	if (history->peer->isChannel()) {
+-		return true;
+-	} else if (const auto user = history->peer->asUser()) {
+-		return user->isBot();
+-	}
+ 	return false;
+ }
+ 
+-- 
+2.55.0.windows.3
+
+
+From cb15c30987486fa17a2b193437bb0f03ce5d72c8 Mon Sep 17 00:00:00 2001
+From: vehlwn <36479428+vehlwn@users.noreply.github.com>
+Date: Mon, 1 Sep 2025 10:27:46 +0400
+Subject: [PATCH 2/4] Disable sponsored ads on videos
+
+---
+ Telegram/SourceFiles/data/components/sponsored_messages.cpp | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/Telegram/SourceFiles/data/components/sponsored_messages.cpp b/Telegram/SourceFiles/data/components/sponsored_messages.cpp
+index 179d38a..6c75882 100644
+--- a/Telegram/SourceFiles/data/components/sponsored_messages.cpp
++++ b/Telegram/SourceFiles/data/components/sponsored_messages.cpp
+@@ -306,8 +306,7 @@ bool SponsoredMessages::canHaveFor(not_null<History*> history) const {
+ }
+ 
+ bool SponsoredMessages::canHaveFor(not_null<HistoryItem*> item) const {
+-	return item->history()->peer->isBroadcast()
+-		&& item->isRegular();
++	return false;
+ }
+ 
+ bool SponsoredMessages::isTopBarFor(not_null<History*> history) const {
+-- 
+2.55.0.windows.3
+
+
+From 41a8d57624328cb40efb7d221abb276f4fde11d2 Mon Sep 17 00:00:00 2001
+From: vehlwn <36479428+vehlwn@users.noreply.github.com>
+Date: Wed, 4 Jun 2025 10:13:25 +0400
+Subject: [PATCH 3/4] Remove top bar suggestions with premium ads and birthdays
+
+---
+ Telegram/SourceFiles/dialogs/dialogs_widget.cpp | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/Telegram/SourceFiles/dialogs/dialogs_widget.cpp b/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
+index d5e55de..7de92e2 100644
+--- a/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
++++ b/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
+@@ -804,10 +804,6 @@ Widget::Widget(
+ 	}
+ 
+ 	setupFrozenAccountBar();
+-	setupTopBarSuggestions();
+-#ifdef _DEBUG
+-	setupTopBarSuggestionTestHotkeys();
+-#endif // _DEBUG
+ }
+ 
+ void Widget::setupSwipeBack() {
+-- 
+2.55.0.windows.3
+
+
+From 65783cb7728098cca85b5aaf27e06f0761634ece Mon Sep 17 00:00:00 2001
+From: rexdotsh <65942753+rexdotsh@users.noreply.github.com>
+Date: Mon, 21 Sep 2026 12:00:00 +0000
+Subject: [PATCH 4/4] Disable sponsored results in chat search
+
+---
+ Telegram/SourceFiles/dialogs/dialogs_widget.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Telegram/SourceFiles/dialogs/dialogs_widget.cpp b/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
+index 7de92e2..c840cdd 100644
+--- a/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
++++ b/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
+@@ -428,7 +428,7 @@ Widget::Widget(
+ 		_storiesContents.events() | rpl::flatten_latest())
+ 	: nullptr)
+ , _searchTimer([=] { search(); })
+-, _peerSearch(&controller->session(), Api::PeerSearch::Type::WithSponsored)
++, _peerSearch(&controller->session(), Api::PeerSearch::Type::JustPeers)
+ , _singleMessageSearch(&controller->session()) {
+ 	const auto makeChildListShown = [](PeerId peerId, float64 shown) {
+ 		return InnerWidget::ChildListShown{ peerId, shown };
+-- 
+2.55.0.windows.3
+

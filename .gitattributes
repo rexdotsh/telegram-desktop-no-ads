@@ -1,0 +1,6 @@
+# The patch must stay LF. Git for Windows defaults to core.autocrlf=true, and a
+# CRLF patch will not apply against the LF tdesktop sources on the CI runner.
+*.patch -text
+
+*.yml text eol=lf
+*.md  text eol=lf
