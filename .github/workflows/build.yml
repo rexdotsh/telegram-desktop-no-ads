@@ -140,9 +140,12 @@ jobs:
 
       # No skip-release here: upstream CI builds Telegram in Debug, we ship Release.
       # Expect several runs before this completes for the first time.
+      # Capped well short of the 6h job ceiling so a run that gets the libraries
+      # done still has time to build Telegram. Overrunning is not wasted: the
+      # cache is saved right after this step, so the next run resumes.
       - name: Build libraries.
         id: libraries
-        timeout-minutes: 300
+        timeout-minutes: 240
         continue-on-error: true
         run: |
           %TBUILD%\tdesktop\Telegram\build\prepare\win.bat silent
