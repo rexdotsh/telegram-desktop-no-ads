@@ -227,7 +227,8 @@ jobs:
       - name: Build Telegram Desktop.
         if: ${{ !inputs.libraries_only }}
         run: |
-          cd %TBUILD%\tdesktop\Telegram
+          cd /d %TBUILD%\tdesktop\Telegram
+          if not exist configure.bat exit /b 1
 
           call configure.bat x64 ^
           -D TDESKTOP_API_ID=%TDESKTOP_API_ID% ^
