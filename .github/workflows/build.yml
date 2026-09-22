@@ -33,6 +33,11 @@ jobs:
     env:
       TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID || '611335' }}
       TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH || 'd524b414d21f4d37f08684c1df41ac9c' }}
+      # VS 2026 defaults some CMake projects to v145 even when vcvars is
+      # initialized for v143. Keep every dependency on the same toolset as
+      # Telegram itself.
+      CMAKE_GENERATOR: "Visual Studio 18 2026"
+      CMAKE_GENERATOR_TOOLSET: v143
 
     steps:
       - name: Resolve version.
@@ -89,7 +94,15 @@ jobs:
           sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' \
             "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
 
-          echo "CACHE_KEY=$(sha256sum "$TD/Telegram/build/prepare/prepare.py" | awk '{ print $1 }')" >> "$GITHUB_ENV"
+          echo "$(sha256sum "$TD/Telegram/build/prepare/prepare.py" | awk '{ print $1 }')" > CACHE_KEY.txt
+          {
+            echo "CMAKE_GENERATOR=$CMAKE_GENERATOR"
+            echo "CMAKE_GENERATOR_TOOLSET=$CMAKE_GENERATOR_TOOLSET"
+            echo "MSVC_TOOLSET=14.44"
+            echo "SDK=$SDK"
+            echo "CACHE_SCHEMA=2"
+          } >> CACHE_KEY.txt
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> "$GITHUB_ENV"
 
           git config --global user.email "you@example.com"
           git config --global user.name "Sample"
@@ -140,7 +153,6 @@ jobs:
           key: third-party-${{ env.CACHE_KEY }}-${{ github.run_id }}
           restore-keys: |
             third-party-${{ env.CACHE_KEY }}-
-            third-party-
 
       - name: Restore libraries cache.
         uses: actions/cache/restore@v6
@@ -154,7 +166,6 @@ jobs:
           key: libs-${{ env.CACHE_KEY }}-${{ github.run_id }}
           restore-keys: |
             libs-${{ env.CACHE_KEY }}-
-            libs-
 
       - name: Restore Qt cache.
         uses: actions/cache/restore@v6
@@ -165,7 +176,6 @@ jobs:
           key: qt-${{ env.CACHE_KEY }}-${{ github.run_id }}
           restore-keys: |
             qt-${{ env.CACHE_KEY }}-
-            qt-
 
       # No skip-release here: upstream CI builds Telegram in Debug, we ship Release.
       # Expect several runs before this completes for the first time.
