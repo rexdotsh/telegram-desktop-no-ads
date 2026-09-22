@@ -79,6 +79,9 @@ jobs:
         shell: bash
         run: |
           TD="$(cygpath -u "$TBUILD")/tdesktop"
+          DOCPATH="$TD/docs/building-win.md"
+          SDK="$(grep "SDK version" "$DOCPATH" | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
 
           # Debug library builds are never linked into the release binary, but
           # prepare.py has no skip-debug switch. Dropping /Zi from them saves a
@@ -86,15 +89,41 @@ jobs:
           sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' \
             "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
 
-          echo "CACHE_KEY=$(sha256sum "$TD/Telegram/build/prepare/prepare.py" | awk '{ print $1 }')" >> $GITHUB_ENV
+          echo "CACHE_KEY=$(sha256sum "$TD/Telegram/build/prepare/prepare.py" | awk '{ print $1 }')" >> "$GITHUB_ENV"
 
           git config --global user.email "you@example.com"
           git config --global user.name "Sample"
 
-      - uses: ilammy/msvc-dev-cmd@v1
+      # VS 2026 does not install the v143/14.44 ATL headers by default. The
+      # release breakpad stage builds dump_syms and needs atlbase.h/atlcomcli.h.
+      - name: Install v143 ATL.
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $setup = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe'
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installPath) { throw 'Visual Studio installation was not found.' }
+
+          $arguments = @(
+            'modify', '--installPath', "`"$installPath`"",
+            '--add', 'Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL',
+            '--quiet', '--wait', '--norestart'
+          )
+          $process = Start-Process -FilePath $setup -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+            throw "Visual Studio ATL installation failed with exit code $($process.ExitCode)."
+          }
+
+          $atl = Get-ChildItem "$installPath\VC\Tools\MSVC\14.44.*\ATLMFC\include\atlbase.h" -ErrorAction SilentlyContinue
+          if (-not $atl) { throw 'The v143 ATL headers were not installed.' }
+          Write-Host "ATL headers: $($atl.FullName)"
+
+      - uses: Eden-CI/msvc-dev-cmd@master
         name: Native Tools Command Prompt.
         with:
           arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: 14.44
 
       - name: NuGet sources.
         run: |
