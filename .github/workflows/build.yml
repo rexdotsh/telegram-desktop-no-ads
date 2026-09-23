@@ -33,11 +33,6 @@ jobs:
     env:
       TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID || '611335' }}
       TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH || 'd524b414d21f4d37f08684c1df41ac9c' }}
-      # VS 2026 defaults some CMake projects to v145 even when vcvars is
-      # initialized for v143. Keep every dependency on the same toolset as
-      # Telegram itself.
-      CMAKE_GENERATOR: "Visual Studio 18 2026"
-      CMAKE_GENERATOR_TOOLSET: v143
 
     steps:
       - name: Resolve version.
@@ -94,16 +89,6 @@ jobs:
           sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' \
             "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
 
-          echo "$(sha256sum "$TD/Telegram/build/prepare/prepare.py" | awk '{ print $1 }')" > CACHE_KEY.txt
-          {
-            echo "CMAKE_GENERATOR=$CMAKE_GENERATOR"
-            echo "CMAKE_GENERATOR_TOOLSET=$CMAKE_GENERATOR_TOOLSET"
-            echo "MSVC_TOOLSET=14.44"
-            echo "SDK=$SDK"
-            echo "CACHE_SCHEMA=2"
-          } >> CACHE_KEY.txt
-          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> "$GITHUB_ENV"
-
           git config --global user.email "you@example.com"
           git config --global user.name "Sample"
 
@@ -138,21 +123,81 @@ jobs:
           sdk: ${{ env.SDK }}
           toolset: 14.44
 
+      # Dependency builds use Ninja Multi-Config from prepare.py. Do not set
+      # CMAKE_GENERATOR_TOOLSET globally: Ninja does not accept Visual Studio
+      # toolset flags. The tdesktop configure helper selects v143 for its own
+      # Visual Studio generator; here we verify the compiler Ninja will find.
+      - name: Verify MSVC and CMake toolchain.
+        shell: pwsh
+        run: |
+          if ($env:VCToolsVersion -notmatch '^14\.44\.') {
+            throw "Expected MSVC 14.44, found '$env:VCToolsVersion'."
+          }
+          if ($env:CMAKE_GENERATOR_TOOLSET) {
+            throw "CMAKE_GENERATOR_TOOLSET must be unset for upstream's Ninja dependency builds."
+          }
+
+          $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
+          if (-not $compiler.StartsWith($env:VCToolsInstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "cl.exe '$compiler' is outside VCToolsInstallDir '$env:VCToolsInstallDir'."
+          }
+          Write-Host "MSVC tools: $env:VCToolsVersion ($compiler)"
+          cmake --version
+
+          $probe = Join-Path $env:RUNNER_TEMP 'tdesktop-cmake-toolchain-probe'
+          New-Item -ItemType Directory -Force $probe | Out-Null
+          @'
+          cmake_minimum_required(VERSION 3.25)
+          project(TDesktopToolchainProbe LANGUAGES CXX)
+          add_executable(toolchain_probe main.cpp)
+          '@ | Set-Content -Encoding ascii (Join-Path $probe 'CMakeLists.txt')
+          'int main() { return 0; }' | Set-Content -Encoding ascii (Join-Path $probe 'main.cpp')
+          cmake -S $probe -B (Join-Path $probe 'build') -G 'Ninja Multi-Config'
+          if ($LASTEXITCODE -ne 0) { throw 'CMake/Ninja could not configure with the selected MSVC toolchain.' }
+          cmake --build (Join-Path $probe 'build') --config Release
+          if ($LASTEXITCODE -ne 0) { throw 'CMake/Ninja could not build with the selected MSVC toolchain.' }
+
+      - name: Resolve toolchain cache key.
+        shell: pwsh
+        run: |
+          $prepare = Join-Path $env:TBUILD 'tdesktop\Telegram\build\prepare\prepare.py'
+          $prepareHash = (Get-FileHash -Algorithm SHA256 -Path $prepare).Hash.ToLowerInvariant()
+          $cmakeVersion = (cmake --version | Select-Object -First 1)
+          $identity = @(
+            "prepare=$prepareHash"
+            "runner=$env:RUNNER_OS/$env:RUNNER_ARCH"
+            "visual-studio=$env:VisualStudioVersion"
+            "msvc=$env:VCToolsVersion"
+            "sdk=$env:SDK"
+            'dependency-generator=Ninja Multi-Config'
+            "cmake=$cmakeVersion"
+            'cache-schema=3'
+          )
+          $identity | Set-Content -Encoding ascii CACHE_KEY.txt
+
+          $sha256 = [System.Security.Cryptography.SHA256]::Create()
+          $bytes = [System.Text.Encoding]::ASCII.GetBytes(($identity -join "`n") + "`n")
+          $cacheKey = [System.BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+          Add-Content -Path $env:GITHUB_ENV -Value "CACHE_KEY=$cacheKey" -Encoding utf8
+          Get-Content CACHE_KEY.txt
+          Write-Host "Toolchain cache key: $cacheKey"
+
       - name: NuGet sources.
         run: |
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
           nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
 
-      # Caches are restored and saved explicitly with a run-unique key so that a
-      # run which only gets partway through the libraries still saves progress.
-      # actions/cache would refuse to write again after its first exact key hit.
+      # Cache identity includes the actual MSVC version, SDK, CMake, and
+      # dependency generator. No broad restore prefix: the old compiler-agnostic
+      # cache keys mixed 14.51 libraries with the 14.44 Telegram build.
+      # Run-unique save keys let partial library progress be reused safely.
       - name: Restore ThirdParty cache.
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.TBUILD }}\ThirdParty
-          key: third-party-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          key: third-party-v143-${{ env.CACHE_KEY }}-${{ github.run_id }}
           restore-keys: |
-            third-party-${{ env.CACHE_KEY }}-
+            third-party-v143-${{ env.CACHE_KEY }}-
 
       - name: Restore libraries cache.
         uses: actions/cache/restore@v6
@@ -163,9 +208,9 @@ jobs:
             !${{ env.LibrariesPath }}\[qQ]t[_-]*
             ${{ env.LibrariesPath }}\cache_keys\*
             !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
-          key: libs-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          key: libs-v143-${{ env.CACHE_KEY }}-${{ github.run_id }}
           restore-keys: |
-            libs-${{ env.CACHE_KEY }}-
+            libs-v143-${{ env.CACHE_KEY }}-
 
       - name: Restore Qt cache.
         uses: actions/cache/restore@v6
@@ -173,9 +218,9 @@ jobs:
           path: |
             ${{ env.LibrariesPath }}\[qQ]t[_-]*
             ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
-          key: qt-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          key: qt-v143-${{ env.CACHE_KEY }}-${{ github.run_id }}
           restore-keys: |
-            qt-${{ env.CACHE_KEY }}-
+            qt-v143-${{ env.CACHE_KEY }}-
 
       # No skip-release here: upstream CI builds Telegram in Debug, we ship Release.
       # Expect several runs before this completes for the first time.
@@ -202,7 +247,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ env.TBUILD }}\ThirdParty
-          key: third-party-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          key: third-party-v143-${{ env.CACHE_KEY }}-${{ github.run_id }}
 
       - name: Save libraries cache.
         if: always() && steps.libraries.conclusion != 'skipped'
@@ -215,7 +260,7 @@ jobs:
             !${{ env.LibrariesPath }}\[qQ]t[_-]*
             ${{ env.LibrariesPath }}\cache_keys\*
             !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
-          key: libs-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          key: libs-v143-${{ env.CACHE_KEY }}-${{ github.run_id }}
 
       - name: Save Qt cache.
         if: always() && steps.libraries.conclusion != 'skipped'
@@ -225,7 +270,7 @@ jobs:
           path: |
             ${{ env.LibrariesPath }}\[qQ]t[_-]*
             ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
-          key: qt-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          key: qt-v143-${{ env.CACHE_KEY }}-${{ github.run_id }}
 
       - name: Check libraries.
         if: steps.libraries.outcome == 'failure'
