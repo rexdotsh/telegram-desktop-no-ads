@@ -43,17 +43,24 @@ jobs:
           echo "TDESKTOP_VERSION=$VERSION" >> $GITHUB_ENV
           echo "Building tdesktop $VERSION"
 
-      # prepare.py chdirs to <source>/../../../.., so Libraries and ThirdParty must
-      # be siblings of the source tree. This lives on C: rather than the workspace
-      # on D: because the library tree needs the space. Upstream reaches the same
-      # place via a symlink from the workspace, but bsdtar refuses to extract
-      # through a directory symlink, so point at the real path instead.
+      # Keep the source, dependency trees, caches, and app outputs together on
+      # the runner's large temporary D: volume. The C: volume filled during the
+      # previous Telegram compile before the artifact could be linked.
       - name: Prepare directories.
+        shell: pwsh
         run: |
-          mkdir %userprofile%\TBuild\Libraries\win64
-          mkdir %userprofile%\TBuild\ThirdParty
-          echo TBUILD=%userprofile%\TBuild>>%GITHUB_ENV%
-          echo LibrariesPath=%userprofile%\TBuild\Libraries\win64>>%GITHUB_ENV%
+          $buildRoot = 'D:\TBuild'
+          $freeBytes = (Get-PSDrive -Name D -ErrorAction Stop).Free
+          $freeGiB = [math]::Round($freeBytes / 1GB, 1)
+          Write-Host "D: has $freeGiB GiB free before the build."
+          if ($freeBytes -lt 80GB) {
+            throw "D: needs at least 80 GiB free for the Telegram build; found $freeGiB GiB."
+          }
+
+          New-Item -ItemType Directory -Force "$buildRoot\Libraries\win64" | Out-Null
+          New-Item -ItemType Directory -Force "$buildRoot\ThirdParty" | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "TBUILD=$buildRoot" -Encoding utf8
+          Add-Content -Path $env:GITHUB_ENV -Value "LibrariesPath=$buildRoot\Libraries\win64" -Encoding utf8
 
       - name: Checkout this repository.
         uses: actions/checkout@v7
