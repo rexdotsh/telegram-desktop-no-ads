@@ -62,6 +62,27 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "TBUILD=$buildRoot" -Encoding utf8
           Add-Content -Path $env:GITHUB_ENV -Value "LibrariesPath=$buildRoot\Libraries\win64" -Encoding utf8
 
+      # Earlier Release builds died with Windows error 1455 (commit limit
+      # reached). Extra page file space on D: is headroom only; the Telegram
+      # build settings below are the actual fix, so this may fail harmlessly.
+      - name: Enlarge the page file.
+        continue-on-error: true
+        uses: al-cheb/configure-pagefile-action@v1.5
+        with:
+          minimum-size: 32GB
+          maximum-size: 48GB
+          disk-root: "D:"
+
+      - name: Show memory limits.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host ("Physical memory: {0:N1} GiB" -f ($os.TotalVisibleMemorySize / 1MB))
+          Write-Host ("Commit limit: {0:N1} GiB" -f ($os.TotalVirtualMemorySize / 1MB))
+          Get-CimInstance Win32_PageFileUsage |
+            Format-Table Name, AllocatedBaseSize, CurrentUsage -AutoSize | Out-String | Write-Host
+
       - name: Checkout this repository.
         uses: actions/checkout@v7
         with:
@@ -286,8 +307,15 @@ jobs:
           echo "::error::Libraries did not finish. Progress was cached, re-run the workflow to continue where it stopped."
           exit 1
 
+      # tdesktop's CMake helpers default Release to embedded /Z7 debug info,
+      # which ran the hosted runner out of memory on the Telegram target.
+      # Build without debug info and with at most two compilers per project,
+      # as Telegram's CI and Forkgram's Windows Release workflow do.
+      # --parallel only limits MSBuild projects; _CL_ caps cl.exe's /MP.
       - name: Build Telegram Desktop.
         if: ${{ !inputs.libraries_only }}
+        env:
+          _CL_: /MP2
         run: |
           cd /d %TBUILD%\tdesktop\Telegram
           if not exist configure.bat exit /b 1
@@ -296,12 +324,11 @@ jobs:
           -D TDESKTOP_API_ID=%TDESKTOP_API_ID% ^
           -D TDESKTOP_API_HASH=%TDESKTOP_API_HASH% ^
           -D CMAKE_CONFIGURATION_TYPES=Release ^
+          -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
           -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
-          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON || exit /b 1
 
-          rem Bound concurrent C++ compilers to fit the hosted runner's 16 GiB RAM.
-          rem Unbounded Release builds exhausted MSVC's heap while creating PCH files.
-          cmake --build ..\out --config Release --parallel 2
+          cmake --build ..\out --config Release --target Telegram --parallel 2
 
       - name: Package.
         if: ${{ !inputs.libraries_only }}
@@ -311,10 +338,12 @@ jobs:
           New-Item -ItemType Directory -Force artifact | Out-Null
           Copy-Item "$out\Telegram.exe" artifact\
           if (Test-Path "$out\Updater.exe") { Copy-Item "$out\Updater.exe" artifact\ }
+          # ANGLE's d3dcompiler_47.dll, shipped next to Telegram.exe in official builds.
+          if (Test-Path "$out\modules") { Copy-Item -Recurse "$out\modules" artifact\ }
           $zip = "telegram-desktop-no-ads-$env:TDESKTOP_VERSION-x64.zip"
           Compress-Archive -Path artifact\* -DestinationPath $zip
           echo "ZIP=$zip" >> $env:GITHUB_ENV
-          Get-ChildItem artifact | Select-Object Name, Length
+          Get-ChildItem -Recurse -File artifact | Select-Object FullName, Length
 
       - name: Upload artifact.
         if: ${{ !inputs.libraries_only }}
