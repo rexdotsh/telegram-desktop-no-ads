@@ -299,7 +299,9 @@ jobs:
           -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
           -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
 
-          cmake --build ..\out --config Release --parallel
+          rem Bound concurrent C++ compilers to fit the hosted runner's 16 GiB RAM.
+          rem Unbounded Release builds exhausted MSVC's heap while creating PCH files.
+          cmake --build ..\out --config Release --parallel 2
 
       - name: Package.
         if: ${{ !inputs.libraries_only }}
